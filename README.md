@@ -8,6 +8,8 @@
 
 A user-friendly plugin that remembers your cursor position and scroll state for each note.
 
+<img width="639" height="219" alt="image" src="https://github.com/user-attachments/assets/bd044bee-33a5-4328-a6c5-c1df6f49d187" />
+
 Instead of forcibly scrolling you back, **Cursor Jumper** shows a polite popup in the top-right corner, asking if you want to jump back to where you left off.
 
 ## Features
@@ -71,5 +73,6 @@ MIT License
 主要的修改包括：将核心逻辑重构为事件驱动架构，并添加了 UI 弹窗提示机制。
 
 ## 许可证
+
 
 MIT License
