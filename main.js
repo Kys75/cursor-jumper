@@ -10,7 +10,7 @@ const obsidian = require('obsidian');
 
 const SAFE_DB_FLUSH_INTERVAL = 5000;
 
-// 内置 CSS 样式
+// 内置 CSS 样式，确保提示框美观且位置正确
 const PLUGIN_STYLES = `
 .rcp-prompt-toast {
     position: fixed;
@@ -64,41 +64,52 @@ const PLUGIN_STYLES = `
 `;
 
 const DEFAULT_SETTINGS = {
-    dbFileName: '.obsidian/plugins/cursor-jumper/cursor-positions.json',
+    dbFileName: '.obsidian/plugins/remember-cursor-position/cursor-positions.json',
     saveTimer: SAFE_DB_FLUSH_INTERVAL,
     deleteAfterDays: 90,
-    promptDuration: 10000,
+    promptDuration: 10000, // 10秒后自动消失
 };
 
-class CursorJumper extends obsidian.Plugin {
+class RememberCursorPosition extends obsidian.Plugin {
     async onload() {
         await this.loadSettings();
+        
+        // 1. 注入样式
         this.injectStyles();
 
+        // 2. 初始化数据
         this.db = {};
         this.lastSavedDb = {};
-        this.activeToastEl = null;
-        this.activeTimer = null;
+        
+        // 3. UI 状态管理 (State Management)
+        this.activeToastEl = null;   // 当前显示的 DOM 元素
+        this.activeTimer = null;     // 自动消失计时器
 
         try {
             this.db = await this.readDb();
             this.cleanupOldEntries();
             this.lastSavedDb = JSON.parse(JSON.stringify(this.db));
         } catch (e) {
-            console.error("Cursor Jumper: Error reading database", e);
+            console.error("Remember Cursor Position: Error reading database", e);
             this.db = {};
             this.lastSavedDb = {};
         }
 
+        // 防抖保存
         this.debouncedCheckAndSave = obsidian.debounce(() => {
             this.checkEphemeralStateChanged();
         }, 300, true);
 
         this.addSettingTab(new SettingTab(this.app, this));
 
+        // --- 事件监听 ---
+
+        // 文件打开：显示提示框
         this.registerEvent(
             this.app.workspace.on('file-open', (file) => {
+                // 切换文件时，首先清除上一个文件的提示框（波函数坍缩）
                 this.clearPrompt();
+                
                 if (file) {
                     this.checkAndShowPrompt(file);
                     this.registerScrollListener();
@@ -106,6 +117,7 @@ class CursorJumper extends obsidian.Plugin {
             })
         );
 
+        // 编辑/滚动：记录位置
         this.registerEvent(
             this.app.workspace.on('editor-change', () => this.debouncedCheckAndSave())
         );
@@ -118,6 +130,7 @@ class CursorJumper extends obsidian.Plugin {
     }
 
     onunload() {
+        // 插件卸载时清理 UI
         this.clearPrompt();
         const styleEl = document.getElementById('rcp-styles');
         if (styleEl) styleEl.remove();
@@ -132,11 +145,15 @@ class CursorJumper extends obsidian.Plugin {
         }
     }
 
+    // --- UI 逻辑：提示框核心 ---
+
     clearPrompt() {
+        // 清除计时器
         if (this.activeTimer) {
             clearTimeout(this.activeTimer);
             this.activeTimer = null;
         }
+        // 移除 DOM
         if (this.activeToastEl) {
             this.activeToastEl.remove();
             this.activeToastEl = null;
@@ -146,51 +163,68 @@ class CursorJumper extends obsidian.Plugin {
     checkAndShowPrompt(file) {
         const fileName = file.path;
         const st = this.db[fileName];
+        
+        // 如果没有历史记录，直接退出
         if (!st) return;
 
+        // 检查是否通过锚点打开 (Anchor Check)
         const activeLeaf = this.app.workspace.getMostRecentLeaf();
         if (activeLeaf) {
             const viewState = activeLeaf.getViewState();
+            // 如果原生指令包含定位信息，则不显示提示，避免干扰
             if (viewState.ephemeralState && (viewState.ephemeralState.scroll || viewState.ephemeralState.line)) {
                 return;
             }
         }
+
+        // 创建 UI
         this.createPromptUI(file, st);
     }
 
     createPromptUI(file, st) {
+        // 创建容器
         const toast = document.body.createEl('div', { cls: 'rcp-prompt-toast' });
-        const lineInfo = st.cursor ? `Line ${st.cursor.from.line + 1}` : 'Last position';
         
-        toast.createEl('span', { text: `Jump to ${lineInfo}?`, cls: 'rcp-text-info' });
+        // 文本信息
+        const lineInfo = st.cursor ? `第 ${st.cursor.from.line + 1} 行` : '上次位置';
+        toast.createEl('span', { text: `回到 ${lineInfo}?`, cls: 'rcp-text-info' });
 
-        const btnJump = toast.createEl('button', { text: 'Jump', cls: 'rcp-btn-jump' });
+        // 跳转按钮
+        const btnJump = toast.createEl('button', { text: '跳转', cls: 'rcp-btn-jump' });
         btnJump.onclick = () => {
             this.restoreEphemeralState(file.path, st);
-            this.clearPrompt();
+            this.clearPrompt(); // 点击后销毁
         };
 
+        // 关闭按钮
         const btnClose = toast.createEl('button', { text: '✕', cls: 'rcp-btn-close' });
         btnClose.onclick = () => {
             this.clearPrompt();
         };
 
+        // 动画：下一帧添加 class 以触发 CSS transition
         requestAnimationFrame(() => {
             toast.addClass('show');
         });
 
         this.activeToastEl = toast;
+
+        // 设置自动消失定时器 (10秒)
         this.activeTimer = setTimeout(() => {
             if (this.activeToastEl) {
                 this.activeToastEl.removeClass('show');
+                // 等待 CSS 动画结束后移除 DOM
                 setTimeout(() => this.clearPrompt(), 300);
             }
         }, this.settings.promptDuration);
     }
 
+    // --- 核心逻辑：恢复与记录 ---
+
     registerScrollListener() {
         const activeView = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
         if (!activeView) return;
+
         const scrollContainer = activeView.contentEl.querySelector('.cm-scroller');
         if (scrollContainer) {
             this.registerDomEvent(scrollContainer, 'scroll', () => {
@@ -204,20 +238,27 @@ class CursorJumper extends obsidian.Plugin {
         const now = Date.now();
         const expiryMs = this.settings.deleteAfterDays * 24 * 60 * 60 * 1000;
         let deleteCount = 0;
+
         for (const path in this.db) {
             const entry = this.db[path];
-            if (!entry.lastSavedTime) { entry.lastSavedTime = now; continue; }
+            if (!entry.lastSavedTime) {
+                entry.lastSavedTime = now;
+                continue;
+            }
             if (now - entry.lastSavedTime > expiryMs) {
                 delete this.db[path];
                 deleteCount++;
             }
         }
-        if (deleteCount > 0) this.writeDb(this.db);
+        if (deleteCount > 0) {
+            this.writeDb(this.db);
+        }
     }
 
     renameFile(file, oldPath) {
+        const newName = file.path;
         if (this.db[oldPath]) {
-            this.db[file.path] = this.db[oldPath];
+            this.db[newName] = this.db[oldPath];
             delete this.db[oldPath];
         }
     }
@@ -229,8 +270,10 @@ class CursorJumper extends obsidian.Plugin {
     checkEphemeralStateChanged() {
         const fileName = this.app.workspace.getActiveFile()?.path;
         if (!fileName) return;
+
         const st = this.getEphemeralState();
         if (!st.cursor && st.scroll === undefined) return;
+        
         this.saveEphemeralState(st);
     }
 
@@ -244,10 +287,15 @@ class CursorJumper extends obsidian.Plugin {
 
     async restoreEphemeralState(fileName, st) {
         const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+        
+        // 双重检查：确保当前视图还是那个文件
         if (view && view.file && view.file.path === fileName) {
             this.setEphemeralState(st);
+            // 给用户一个视觉反馈（可选：闪烁一下当前行）
             const editor = this.getEditor();
-            if (editor) editor.focus();
+            if (editor) {
+                editor.focus();
+            }
         }
     }
 
@@ -274,6 +322,7 @@ class CursorJumper extends obsidian.Plugin {
     getEphemeralState() {
         const state = {};
         const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+        
         if (view) {
             const scrollMode = view.currentMode;
             if (scrollMode && scrollMode.getScroll) {
@@ -284,7 +333,10 @@ class CursorJumper extends obsidian.Plugin {
                 const from = editor.getCursor("anchor");
                 const to = editor.getCursor("head");
                 if (from && to) {
-                    state.cursor = { from: { ch: from.ch, line: from.line }, to: { ch: to.ch, line: to.line } };
+                    state.cursor = {
+                        from: { ch: from.ch, line: from.line },
+                        to: { ch: to.ch, line: to.line }
+                    };
                 }
             }
         }
@@ -293,6 +345,7 @@ class CursorJumper extends obsidian.Plugin {
 
     setEphemeralState(state) {
         const view = this.app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+        
         if (state.cursor) {
             const editor = this.getEditor();
             if (editor) {
@@ -300,9 +353,12 @@ class CursorJumper extends obsidian.Plugin {
                 editor.scrollIntoView({from: state.cursor.from, to: state.cursor.to}, true);
             }
         }
+
         if (view && state.scroll !== undefined) {
              const currentScroll = view.currentMode?.getScroll();
-             if (currentScroll !== state.scroll) view.setEphemeralState(state);
+             if (currentScroll !== state.scroll) {
+                 view.setEphemeralState(state);
+             }
         }
     }
 
@@ -324,10 +380,11 @@ class SettingTab extends obsidian.PluginSettingTab {
         super(app, plugin);
         this.plugin = plugin;
     }
+
     display() {
         const { containerEl } = this;
         containerEl.empty();
-        containerEl.createEl('h2', { text: 'Cursor Jumper Settings' });
+        containerEl.createEl('h2', { text: 'Remember Cursor Position - Settings' });
 
         new obsidian.Setting(containerEl)
             .setName('Data expiration (days)')
@@ -344,7 +401,7 @@ class SettingTab extends obsidian.PluginSettingTab {
         
         new obsidian.Setting(containerEl)
             .setName('Prompt duration (ms)')
-            .setDesc('How long the popup stays visible.')
+            .setDesc('How long the "Jump to position" box stays visible.')
             .addText(text => text
                 .setValue(String(this.plugin.settings.promptDuration))
                 .onChange(async (value) => {
@@ -357,4 +414,4 @@ class SettingTab extends obsidian.PluginSettingTab {
     }
 }
 
-module.exports = CursorJumper;
+module.exports = RememberCursorPosition;
